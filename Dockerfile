@@ -1,11 +1,16 @@
-# Start from a base image
 FROM ubuntu:22.04
+
+# Set environment variables
+ENV NODE_VERSION 18.18.2
+
+# Create a new user
+RUN adduser --disabled-password --gecos '' cpmerp \
+    && usermod -aG sudo cpmerp
 
 # Install necessary packages
 RUN apt-get update && \
-    apt-get install -y \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
     git \
-    sudo \
     cron \
     curl \
     python3 \
@@ -19,49 +24,50 @@ RUN apt-get update && \
     redis-server \
     xvfb \
     libfontconfig \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Node.js using NVM
+    python3.10-venv \
+    npm \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# Install NVM, Node.js, and Yarn
+RUN DEBIAN_FRONTEND=noninteractive apt-get remove -y \
+    nodejs \
+    npm
+RUN apt-get update && apt-get autoremove
 RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.1/install.sh | bash && \
     export NVM_DIR="$HOME/.nvm" && \
     [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" && \
     nvm install 18.18.2 && \
-    npm install -g npm@latest && \
-    npm install -g yarn
-
-# Copy MariaDB configuration file
+    nvm use 18.18.2 && \
+    nvm alias default 18.18.2 && 
+RUN  npm install npm
+RUN  npm install -y -g yarn
+# Copy MariaDB configuration file and setup script
 COPY resources/50-server.cnf /etc/mysql/mariadb.conf.d/50-server.cnf
-
-# Copy MySQL setup script
 COPY resources/mysql_setup.sh /usr/local/bin/mysql_setup.sh
 
 # Make the script executable
 RUN chmod +x /usr/local/bin/mysql_setup.sh
 
-# Start MariaDB service and run setup script
-RUN service mariadb start && \
-    /usr/local/bin/mysql_setup.sh && \
-    service mariadb stop
+# Switch user and set permissions
+USER cpmerp
+WORKDIR /home/cpmerp
+# Install Frappe Bench
+RUN pip3 install frappe-bench
 
-# Create a new user
-RUN adduser cpmerp && \
-    usermod -aG sudo cpmerp && \
-    su - cpmerp -c "chmod -R o+rx /home/cpmerp"
+# Initialize Frappe Bench
+ENV PATH="/home/cpmerp/.local/bin:${PATH}"
+RUN bench init --frappe-branch version-15 frappe-bench
+WORKDIR /home/cpmerp
+RUN bench get-app https://github.com/frappe/erpnext --branch version-15 \
+    && bench new-site cpm.com --admin-password=asdf@1234 --root-password=asdf@1234 --install-app erpnext \
+    && bench --site cpm.com enable-scheduler \
+    && bench --site cpm.com set-maintenance-mode off \
+    && bench setup production cpmerp \
+    && bench setup nginx \
+    && supervisorctl restart all
 
-# Install frappe-bench
-RUN sudo pip3 install --user frappe-bench 
-RUN su - cpmerp -c "bench init --frappe-branch version-15 frappe-bench"
-RUN su - cpmerp -c "cd frappe-bench && bench start" && \
-    su - cpmerp -c "bench new-site cpm.com && bench use cpm.com" && \
-    su - cpmerp -c "bench get-app https://github.com/frappe/erpnext --branch version-15 && bench --site cpm.com install-app erpnext && bench start"
-
-# Setup production server
-RUN su - cpmerp -c "bench --site cpm.com enable-scheduler" && \
-    su - cpmerp -c "bench --site cpm.com set-maintenance-mode off" && \
-    su - cpmerp -c "sudo bench setup production cpmerp && bench setup nginx && sudo supervisorctl restart all && sudo bench setup production cpmerp"
 # Expose ports
 EXPOSE 80/tcp
 EXPOSE 3306
-# Default command
-CMD ["bash", "-c", "/home/cpmerp/frappe-bench"]
+
+# Start Frappe Bench
+CMD ["bench", "serve", "--port", "8000"]
