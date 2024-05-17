@@ -1,7 +1,9 @@
 FROM ubuntu:22.04
 
 # Set environment variables
-ENV NODE_VERSION 18.18.2
+ENV NODE_VERSION=18.18.2
+ENV NVM_DIR=/usr/local/nvm
+ENV PATH=$NVM_DIR/versions/node/v$NODE_VERSION/bin:$PATH
 
 # Create a new user
 RUN adduser --disabled-password --gecos '' cpmerp \
@@ -25,21 +27,17 @@ RUN apt-get update && \
     xvfb \
     libfontconfig \
     python3.10-venv \
-    npm \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # Install NVM, Node.js, and Yarn
-RUN DEBIAN_FRONTEND=noninteractive apt-get remove -y \
-    nodejs \
-    npm
-RUN apt-get update && apt-get autoremove
-RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.1/install.sh | bash && \
-    export NVM_DIR="$HOME/.nvm" && \
-    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" && \
-    nvm install 18.18.2 && \
-    nvm use 18.18.2 && \
-    nvm alias default 18.18.2 && 
-RUN  npm install npm
-RUN  npm install -y -g yarn
+RUN mkdir -p $NVM_DIR && \
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.1/install.sh | bash && \
+    . $NVM_DIR/nvm.sh && \
+    nvm install $NODE_VERSION && \
+    nvm use $NODE_VERSION && \
+    nvm alias default $NODE_VERSION && \
+    npm install -g yarn
+
 # Copy MariaDB configuration file and setup script
 COPY resources/50-server.cnf /etc/mysql/mariadb.conf.d/50-server.cnf
 COPY resources/mysql_setup.sh /usr/local/bin/mysql_setup.sh
@@ -47,18 +45,23 @@ COPY resources/mysql_setup.sh /usr/local/bin/mysql_setup.sh
 # Make the script executable
 RUN chmod +x /usr/local/bin/mysql_setup.sh
 
-# Switch user and set permissions
-USER cpmerp
+# Set working directory
 WORKDIR /home/cpmerp
+
 # Install Frappe Bench
 RUN pip3 install frappe-bench
 
-# Initialize Frappe Bench
+# Change user to cpmerp
+USER cpmerp
+
+# Set PATH for the new user
 ENV PATH="/home/cpmerp/.local/bin:${PATH}"
+
+# Initialize Frappe Bench
 RUN bench init --frappe-branch version-15 frappe-bench
-WORKDIR /home/cpmerp
-RUN bench get-app https://github.com/frappe/erpnext --branch version-15 \
-    && bench new-site cpm.com --admin-password=asdf@1234 --root-password=asdf@1234 --install-app erpnext \
+WORKDIR /home/cpmerp/frappe-bench
+RUN bench get-app https://github.com/frappe/erpnext --branch version-15
+RUN bench new-site cpm.com --admin-password=asdf@1234 --db-root-password=asdf@1234 --install-app erpnext \
     && bench --site cpm.com enable-scheduler \
     && bench --site cpm.com set-maintenance-mode off \
     && bench setup production cpmerp \

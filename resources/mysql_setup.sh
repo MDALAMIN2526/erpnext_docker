@@ -11,4 +11,4 @@ mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_pas
 # mysql -u root -p<your_password> -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'your_password'; FLUSH PRIVILEGES;"
 
 # Stop the MariaDB service
-service mariadb stop
+service mariadb restart
