@@ -9,7 +9,10 @@ ENV PATH=$NVM_DIR/versions/node/v$NODE_VERSION/bin:$PATH
 RUN adduser --disabled-password --gecos '' cpmerp \
     && usermod -aG sudo cpmerp
 
-# Install necessary packages
+# Create NVM directory
+RUN mkdir -p $NVM_DIR
+
+# Install necessary packages and Node.js, Yarn
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
     git \
@@ -26,11 +29,8 @@ RUN apt-get update && \
     redis-server \
     xvfb \
     libfontconfig \
-    python3.10-venv \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# Install NVM, Node.js, and Yarn
-RUN mkdir -p $NVM_DIR && \
+    python3.10-venv && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* && \
     curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.1/install.sh | bash && \
     . $NVM_DIR/nvm.sh && \
     nvm install $NODE_VERSION && \
@@ -38,12 +38,8 @@ RUN mkdir -p $NVM_DIR && \
     nvm alias default $NODE_VERSION && \
     npm install -g yarn
 
-# Copy MariaDB configuration file and setup script
+# Copy MariaDB configuration file
 COPY resources/50-server.cnf /etc/mysql/mariadb.conf.d/50-server.cnf
-COPY resources/mysql_setup.sh /usr/local/bin/mysql_setup.sh
-
-# Make the script executable
-RUN chmod +x /usr/local/bin/mysql_setup.sh
 
 # Set working directory
 WORKDIR /home/cpmerp
@@ -59,18 +55,21 @@ ENV PATH="/home/cpmerp/.local/bin:${PATH}"
 
 # Initialize Frappe Bench
 RUN bench init --frappe-branch version-15 frappe-bench
-WORKDIR /home/cpmerp/frappe-bench
-RUN bench get-app https://github.com/frappe/erpnext --branch version-15
-RUN bench new-site cpm.com --admin-password=asdf@1234 --db-root-password=asdf@1234 --install-app erpnext \
-    && bench --site cpm.com enable-scheduler \
-    && bench --site cpm.com set-maintenance-mode off \
-    && bench setup production cpmerp \
-    && bench setup nginx \
-    && supervisorctl restart all
+
+# Switch back to root to start MariaDB
+USER root
+
+# Copy and make the entrypoint script executable
+COPY resources/entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Expose ports
 EXPOSE 80/tcp
 EXPOSE 3306
 
-# Start Frappe Bench
-CMD ["bench", "serve", "--port", "8000"]
+# Healthcheck to ensure services are running
+HEALTHCHECK --interval=30s --timeout=10s \
+  CMD curl -f http://localhost:8000/health || exit 1
+
+# Use entrypoint script
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
