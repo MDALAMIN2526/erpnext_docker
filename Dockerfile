@@ -63,32 +63,21 @@ RUN pip install python-dotenv
 
 # Create site using environment variables
 RUN python3 -c "import os; from dotenv import load_dotenv; load_dotenv(); \
-    os.system(f'bench new-site {os.getenv('SITE_NAME')} \
-    --admin-password={os.getenv('DB_ROOT_PASSWORD')} \
-    --mariadb-root-username={os.getenv('DB_ROOT_USER')} \
-    --mariadb-root-password={os.getenv('DB_ROOT_PASSWORD')} \
-    --db-host={os.getenv('DB_HOST')} \
+    os.system(f'bench new-site {os.getenv(\"SITE_NAME\")} \
+    --admin-password={os.getenv(\"DB_ROOT_PASSWORD\")} \
+    --mariadb-root-username={os.getenv(\"DB_ROOT_USER\")} \
+    --mariadb-root-password={os.getenv(\"DB_ROOT_PASSWORD\")} \
+    --db-host={os.getenv(\"DB_HOST\")} \
     --install-app erpnext && \
-    bench --site {os.getenv('SITE_NAME')} enable-scheduler && \
-    bench --site {os.getenv('SITE_NAME')} set-maintenance-mode off')"
-
-# Switch back to root user to set up production and restart services
+    bench --site {os.getenv(\"SITE_NAME\")} enable-scheduler && \
+    bench --site {os.getenv(\"SITE_NAME\")} set-maintenance-mode off')"
 USER root
+# Install and set up fail2ban manually
+RUN apt-get update && \
+    apt-get install -y fail2ban
+
+# Set up production environment
 RUN bench setup production cpmerp && \
     bench setup nginx && \
     service supervisor restart
-
-# Switch back to cpmerp user
-USER cpmerp
-RUN bench get-app erpnext --branch version-15
-
-# Expose necessary ports
-EXPOSE 80/tcp
-EXPOSE 3306
-
-# Healthcheck
-HEALTHCHECK --interval=30s --timeout=10s \
-  CMD curl -f http://localhost:8000/health || exit 1
-
-# Default command
-CMD ["bench", "serve", "--port", "8000"]
+    EXPOSE 80:80
