@@ -1,83 +1,160 @@
-FROM ubuntu:22.04
+ARG PYTHON_VERSION=3.11.6
+ARG DEBIAN_BASE=bookworm
+FROM python:${PYTHON_VERSION}-slim-${DEBIAN_BASE} AS base
 
-# Install required packages
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    sudo \
-    git \
-    cron \
+COPY resources/nginx-template.conf /templates/nginx/frappe.conf.template
+COPY resources/nginx-entrypoint.sh /usr/local/bin/nginx-entrypoint.sh
+
+ARG WKHTMLTOPDF_VERSION=0.12.6.1-3
+ARG WKHTMLTOPDF_DISTRO=bookworm
+ARG NODE_VERSION=18.18.2
+ENV NVM_DIR=/home/frappe/.nvm
+ENV PATH ${NVM_DIR}/versions/node/v${NODE_VERSION}/bin/:${PATH}
+
+RUN useradd -ms /bin/bash frappe \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y \
     curl \
-    python3 \
-    python3-dev \
-    python3-setuptools \
-    python3-pip \
-    virtualenv \
-    software-properties-common \
-    libmysqlclient-dev \
-    redis-server \
-    xvfb \
-    libfontconfig \
-    python3.10-venv && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* 
+    git \
+    vim \
+    nginx \
+    gettext-base \
+    file \
+    # weasyprint dependencies
+    libpango-1.0-0 \
+    libharfbuzz0b \
+    libpangoft2-1.0-0 \
+    libpangocairo-1.0-0 \
+    # For backups
+    restic \
+    gpg \
+    # MariaDB
+    mariadb-client \
+    less \
+    # Postgres
+    libpq-dev \
+    postgresql-client \
+    # For healthcheck
+    wait-for-it \
+    jq \
+    # NodeJS
+    && mkdir -p ${NVM_DIR} \
+    && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.5/install.sh | bash \
+    && . ${NVM_DIR}/nvm.sh \
+    && nvm install ${NODE_VERSION} \
+    && nvm use v${NODE_VERSION} \
+    && npm install -g yarn \
+    && nvm alias default v${NODE_VERSION} \
+    && rm -rf ${NVM_DIR}/.cache \
+    && echo 'export NVM_DIR="/home/frappe/.nvm"' >>/home/frappe/.bashrc \
+    && echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm' >>/home/frappe/.bashrc \
+    && echo '[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion' >>/home/frappe/.bashrc \
+    # Install wkhtmltopdf with patched qt
+    && if [ "$(uname -m)" = "aarch64" ]; then export ARCH=arm64; fi \
+    && if [ "$(uname -m)" = "x86_64" ]; then export ARCH=amd64; fi \
+    && downloaded_file=wkhtmltox_${WKHTMLTOPDF_VERSION}.${WKHTMLTOPDF_DISTRO}_${ARCH}.deb \
+    && curl -sLO https://github.com/wkhtmltopdf/packaging/releases/download/$WKHTMLTOPDF_VERSION/$downloaded_file \
+    && apt-get install -y ./$downloaded_file \
+    && rm $downloaded_file \
+    # Clean up
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -fr /etc/nginx/sites-enabled/default \
+    && pip3 install frappe-bench \
+    # Fixes for non-root nginx and logs to stdout
+    && sed -i '/user www-data/d' /etc/nginx/nginx.conf \
+    && ln -sf /dev/stdout /var/log/nginx/access.log && ln -sf /dev/stderr /var/log/nginx/error.log \
+    && touch /run/nginx.pid \
+    && chown -R frappe:frappe /etc/nginx/conf.d \
+    && chown -R frappe:frappe /etc/nginx/nginx.conf \
+    && chown -R frappe:frappe /var/log/nginx \
+    && chown -R frappe:frappe /var/lib/nginx \
+    && chown -R frappe:frappe /run/nginx.pid \
+    && chmod 755 /usr/local/bin/nginx-entrypoint.sh \
+    && chmod 644 /templates/nginx/frappe.conf.template
 
-# Create a new user
-RUN adduser --disabled-password --gecos '' cpmerp \
-    && usermod -aG sudo cpmerp
+FROM base AS builder
 
-# Environment variables
-ENV NODE_VERSION=18.18.2
-ENV NVM_DIR=/usr/local/nvm
-ENV PATH=$NVM_DIR/versions/node/v$NODE_VERSION/bin:$PATH
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
+    # For frappe framework
+    wget \
+    #for building arm64 binaries
+    libcairo2-dev \
+    libpango1.0-dev \
+    libjpeg-dev \
+    libgif-dev \
+    librsvg2-dev \
+    # For psycopg2
+    libpq-dev \
+    # Other
+    libffi-dev \
+    liblcms2-dev \
+    libldap2-dev \
+    libmariadb-dev \
+    libsasl2-dev \
+    libtiff5-dev \
+    libwebp-dev \
+    redis-tools \
+    rlwrap \
+    tk8.6-dev \
+    cron \
+    # For pandas
+    gcc \
+    build-essential \
+    libbz2-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create necessary directories and install Node.js using nvm
-RUN mkdir -p $NVM_DIR
-RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.1/install.sh | bash && \
-    . $NVM_DIR/nvm.sh && \
-    nvm install $NODE_VERSION && \
-    nvm use $NODE_VERSION && \
-    nvm alias default $NODE_VERSION && \
-    npm install -g yarn
+# Define the content of apps.json
+RUN echo '[ \
+    { "url": "https://github.com/frappe/erpnext", "branch": "version-15" }, \
+    { "url": "https://github.com/MDALAMIN2526/branding", "branch": "main" } \
+]' > /tmp/apps.json
 
-# Set the working directory
-WORKDIR /home/cpmerp
-RUN python3 -m pip install --upgrade pip
-# Install Frappe Bench
-RUN pip3 install frappe-bench
-RUN python3 -m pip install --user --upgrade pip setuptools wheel && \
-    python3 -m pip install --user bench
+# Base64 encode apps.json and decode it to /opt/frappe/apps.json
+RUN mkdir -p /opt/frappe && \
+    cat /tmp/apps.json | base64 | base64 -d > /opt/frappe/apps.json && \
+    rm /tmp/apps.json
 
-# Switch to the cpmerp user
-USER cpmerp
+USER frappe
 
-# Update PATH for the cpmerp user
-ENV PATH="/home/cpmerp/.local/bin:${PATH}"
+ARG FRAPPE_BRANCH=version-15
+ARG FRAPPE_PATH=https://github.com/frappe/frappe
+RUN export APP_INSTALL_ARGS="--apps_path=/opt/frappe/apps.json" && \
+    bench init ${APP_INSTALL_ARGS} \
+    --frappe-branch=${FRAPPE_BRANCH} \
+    --frappe-path=${FRAPPE_PATH} \
+    --no-procfile \
+    --no-backups \
+    --skip-redis-config-generation \
+    --verbose \
+    /home/frappe/frappe-bench && \
+    cd /home/frappe/frappe-bench && \
+    echo "{}" > sites/common_site_config.json && \
+    find apps -mindepth 1 -path "*/.git" | xargs rm -fr
 
-# Initialize bench and get erpnext app
-RUN bench init --frappe-branch version-15 frappe-bench
-WORKDIR /home/cpmerp/frappe-bench
-RUN bench get-app erpnext --branch version-15
+FROM base as backend
 
-# Load environment variables from .env file
-COPY .env /home/cpmerp/frappe-bench/.env
-RUN pip install python-dotenv
+USER frappe
 
-# Create site using environment variables
-RUN python3 -c "import os; from dotenv import load_dotenv; load_dotenv(); \
-    os.system(f'bench new-site {os.getenv(\"SITE_NAME\")} \
-    --admin-password={os.getenv(\"DB_ROOT_PASSWORD\")} \
-    --mariadb-root-username={os.getenv(\"DB_ROOT_USER\")} \
-    --mariadb-root-password={os.getenv(\"DB_ROOT_PASSWORD\")} \
-    --db-host={os.getenv(\"DB_HOST\")} \
-    --install-app erpnext && \
-    bench --site {os.getenv(\"SITE_NAME\")} enable-scheduler && \
-    bench --site {os.getenv(\"SITE_NAME\")} set-maintenance-mode off')"
-USER root
-# Install and set up fail2ban manually
-RUN apt-get update && \
-    apt-get install -y fail2ban
+COPY --from=builder --chown=frappe:frappe /home/frappe/frappe-bench /home/frappe/frappe-bench
 
-# Set up production environment
-RUN bench setup production cpmerp && \
-    bench setup nginx && \
-    service supervisor restart
-    EXPOSE 80:80
+WORKDIR /home/frappe/frappe-bench
+
+VOLUME [ \
+  "/home/frappe/frappe-bench/sites", \
+  "/home/frappe/frappe-bench/sites/assets", \
+  "/home/frappe/frappe-bench/logs" \
+]
+
+CMD [ \
+  "/home/frappe/frappe-bench/env/bin/gunicorn", \
+  "--chdir=/home/frappe/frappe-bench/sites", \
+  "--bind=0.0.0.0:8000", \
+  "--threads=4", \
+  "--workers=2", \
+  "--worker-class=gthread", \
+  "--worker-tmp-dir=/dev/shm", \
+  "--timeout=120", \
+  "--preload", \
+  "frappe.app:application" \
+]
